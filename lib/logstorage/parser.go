@@ -537,6 +537,11 @@ func (q *Query) AddTimeFilter(start, end int64) {
 	q.visitSubqueries(func(q *Query) {
 		q.addTimeFilterNoSubqueries(ft)
 	})
+
+	// Initialize rate functions with the step calculated from HTTP time filter
+	// This fixes the bug where rate_sum() doesn't divide by stepSeconds when
+	// time filter is specified via HTTP params instead of LogsQL expression
+	q.initStatsRateFuncsFromTimeFilter()
 }
 
 func (q *Query) addTimeFilterNoSubqueries(ft *filterTime) {
@@ -587,6 +592,7 @@ func (q *Query) AddPipeLimit(n uint64) {
 	q.pipes = append(q.pipes, &pipeLimit{
 		limit: n,
 	})
+	q.optimize()
 }
 
 // optimize applies various optimations to q.
@@ -666,7 +672,7 @@ func visitSubqueriesInFilter(f filter, visitFunc func(q *Query)) {
 		}
 		return false
 	}
-	_ = visitFilter(f, callback)
+	_ = visitFilterRecursive(f, callback)
 }
 
 func mergeFiltersStream(f filter) filter {
@@ -986,6 +992,28 @@ func removeStarFilters(f filter) filter {
 		logger.Panicf("BUG: unexpected error: %s", err)
 	}
 
+	// Replace filterOr with filterNoop if one of its sub-filters are filterNoop
+	visitFunc = func(f filter) bool {
+		fo, ok := f.(*filterOr)
+		if !ok {
+			return false
+		}
+		for _, f := range fo.filters {
+			if _, ok := f.(*filterNoop); ok {
+				return true
+			}
+		}
+		return false
+	}
+	copyFunc = func(_ filter) (filter, error) {
+		fn := &filterNoop{}
+		return fn, nil
+	}
+	f, err = copyFilter(f, visitFunc, copyFunc)
+	if err != nil {
+		logger.Panicf("BUG: unexpected error: %s", err)
+	}
+
 	// Drop filterNoop inside filterAnd
 	visitFunc = func(f filter) bool {
 		fa, ok := f.(*filterAnd)
@@ -1182,14 +1210,17 @@ func ParseQueryAtTimestamp(s string, timestamp int64) (*Query, error) {
 		return nil, fmt.Errorf("unexpected unparsed tail after [%s]; context: [%s]; tail: [%s]", q, lex.context(), lex.s)
 	}
 	q.optimize()
+	q.initStatsRateFuncsFromTimeFilter()
 
+	return q, nil
+}
+
+func (q *Query) initStatsRateFuncsFromTimeFilter() {
 	start, end := q.GetFilterTimeRange()
 	if start != math.MinInt64 && end != math.MaxInt64 {
 		step := end - start + 1 // 1 is needed in order to include [start ... end] in the step.
 		q.initStatsRateFuncs(step)
 	}
-
-	return q, nil
 }
 
 func (q *Query) initStatsRateFuncs(step int64) {
@@ -1582,6 +1613,11 @@ func getCompoundToken(lex *lexer) (string, error) {
 }
 
 func (lex *lexer) isInvalidQuotedString() error {
+	if lex.isQuotedToken() {
+		// The string is already properly quoted and parsed.
+		return nil
+	}
+
 	if lex.token != `"` && lex.token != "`" && lex.token != `'` {
 		return nil
 	}
@@ -2014,7 +2050,7 @@ func newFilterRegexp(fieldName, arg string) (filter, error) {
 
 	re, err := regexutil.NewRegex(arg)
 	if err != nil {
-		return nil, fmt.Errorf("invalid regexp %q: %w", arg, err)
+		return nil, fmt.Errorf("invalid regexp %q:%q: %w", getCanonicalColumnName(fieldName), arg, err)
 	}
 	fr := &filterRegexp{
 		fieldName: getCanonicalColumnName(fieldName),
@@ -2025,7 +2061,10 @@ func newFilterRegexp(fieldName, arg string) (filter, error) {
 
 func parseFilterTilda(lex *lexer, fieldName string) (filter, error) {
 	lex.nextToken()
-	arg := getCompoundFuncArg(lex)
+	arg, err := getCompoundToken(lex)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read regexp for field %q: %w", getCanonicalColumnName(fieldName), err)
+	}
 	return newFilterRegexp(fieldName, arg)
 }
 

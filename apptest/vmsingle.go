@@ -10,8 +10,9 @@ import (
 	"testing"
 	"time"
 
-	pb "github.com/VictoriaMetrics/VictoriaMetrics/lib/prompbmarshal"
 	"github.com/golang/snappy"
+
+	pb "github.com/VictoriaMetrics/VictoriaMetrics/lib/prompbmarshal"
 )
 
 // Vmsingle holds the state of a vmsingle app and provides vmsingle-specific
@@ -317,6 +318,25 @@ func (app *Vmsingle) PrometheusAPIV1Series(t *testing.T, matchQuery string, opts
 	return NewPrometheusAPIV1SeriesResponse(t, res)
 }
 
+// GraphiteMetricsIndex sends a query to a /metrics/index.json
+//
+// See https://docs.victoriametrics.com/victoriametrics/integrations/graphite/#metrics-api
+func (app *Vmsingle) GraphiteMetricsIndex(t *testing.T, _ QueryOpts) GraphiteMetricsIndexResponse {
+	t.Helper()
+
+	seriesURL := fmt.Sprintf("http://%s/metrics/index.json", app.httpListenAddr)
+	res, statusCode := app.cli.Get(t, seriesURL)
+	if statusCode != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d, want %d, resp text=%q", statusCode, http.StatusOK, res)
+	}
+
+	var index GraphiteMetricsIndexResponse
+	if err := json.Unmarshal([]byte(res), &index); err != nil {
+		t.Fatalf("could not unmarshal metrics index response data:\n%s\n err: %v", res, err)
+	}
+	return index
+}
+
 // APIV1StatusMetricNamesStats sends a query to a /api/v1/status/metric_names_stats endpoint
 // and returns the statistics response for given params.
 //
@@ -363,8 +383,7 @@ func (app *Vmsingle) APIV1AdminStatusMetricNamesStatsReset(t *testing.T, opts Qu
 func (app *Vmsingle) SnapshotCreate(t *testing.T) *SnapshotCreateResponse {
 	t.Helper()
 
-	queryURL := fmt.Sprintf("http://%s/snapshot/create", app.httpListenAddr)
-	data, statusCode := app.cli.Post(t, queryURL, "", nil)
+	data, statusCode := app.cli.Post(t, app.SnapshotCreateURL(), "", nil)
 	if got, want := statusCode, http.StatusOK; got != want {
 		t.Fatalf("unexpected status code: got %d, want %d, resp text=%q", got, want, data)
 	}
@@ -375,6 +394,11 @@ func (app *Vmsingle) SnapshotCreate(t *testing.T) *SnapshotCreateResponse {
 	}
 
 	return &res
+}
+
+// SnapshotCreateURL returns the URL for creating snapshots.
+func (app *Vmsingle) SnapshotCreateURL() string {
+	return fmt.Sprintf("http://%s/snapshot/create", app.httpListenAddr)
 }
 
 // APIV1AdminTSDBSnapshot creates a database snapshot by sending a query to the

@@ -238,6 +238,9 @@ func (lr *LogRows) ForEachRow(callback func(streamHash uint64, r *InsertRow)) {
 
 		callback(streamHash, r)
 	}
+	// remove reference to logRows fields
+	// since reset of r can modify actual LogRows
+	r.Fields = nil
 	PutInsertRow(r)
 }
 
@@ -261,6 +264,11 @@ func (lr *LogRows) Reset() {
 	lr.extraStreamFields = lr.extraStreamFields[:0]
 
 	lr.defaultMsgValue = ""
+}
+
+// RowsCount returns current log rows count
+func (lr *LogRows) RowsCount() int {
+	return len(lr.rows)
 }
 
 // ResetKeepSettings resets rows stored in lr, while keeping its settings passed to GetLogRows().

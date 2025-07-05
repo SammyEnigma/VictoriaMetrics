@@ -7,11 +7,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/VictoriaMetrics/metrics"
 
-	"github.com/VictoriaMetrics/VictoriaMetrics/app/vlstorage"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/httpserver"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/httputil"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/logger"
@@ -36,6 +36,7 @@ type CommonParams struct {
 	DecolorizeFields []string
 	ExtraFields      []logstorage.Field
 
+	IsTimeFieldSet  bool
 	Debug           bool
 	DebugRequestURI string
 	DebugRemoteAddr string
@@ -49,8 +50,10 @@ func GetCommonParams(r *http.Request) (*CommonParams, error) {
 		return nil, err
 	}
 
+	var isTimeFieldSet bool
 	timeFields := []string{"_time"}
 	if tfs := httputil.GetArray(r, "_time_field", "VL-Time-Field"); len(tfs) > 0 {
+		isTimeFieldSet = true
 		timeFields = tfs
 	}
 
@@ -86,9 +89,11 @@ func GetCommonParams(r *http.Request) (*CommonParams, error) {
 		IgnoreFields:     ignoreFields,
 		DecolorizeFields: decolorizeFields,
 		ExtraFields:      extraFields,
-		Debug:            debug,
-		DebugRequestURI:  debugRequestURI,
-		DebugRemoteAddr:  debugRemoteAddr,
+
+		IsTimeFieldSet:  isTimeFieldSet,
+		Debug:           debug,
+		DebugRequestURI: debugRequestURI,
+		DebugRemoteAddr: debugRemoteAddr,
 	}
 
 	return cp, nil
@@ -141,6 +146,29 @@ func GetCommonParamsForSyslog(tenantID logstorage.TenantID, streamFields, ignore
 	return cp
 }
 
+// LogRowsStorage is an interface for ingesting logs into the storage.
+type LogRowsStorage interface {
+	// MustAddRows must add lr to the underlying storage.
+	MustAddRows(lr *logstorage.LogRows)
+
+	// CanWriteData must returns non-nil error if logs cannot be added to the underlying storage.
+	CanWriteData() error
+}
+
+var logRowsStorage LogRowsStorage
+
+// SetLogRowsStorage sets the storage for writing data to via LogMessageProcessor.
+//
+// This function must be called before using LogMessageProcessor and CanWriteData from this package.
+func SetLogRowsStorage(storage LogRowsStorage) {
+	logRowsStorage = storage
+}
+
+// CanWriteData returns non-nil error if data cannot be written to the underlying storage.
+func CanWriteData() error {
+	return logRowsStorage.CanWriteData()
+}
+
 // LogMessageProcessor is an interface for log message processors.
 type LogMessageProcessor interface {
 	// AddRow must add row to the LogMessageProcessor with the given timestamp and fields.
@@ -165,6 +193,7 @@ type logMessageProcessor struct {
 
 	rowsIngestedTotal  *metrics.Counter
 	bytesIngestedTotal *metrics.Counter
+	flushDuration      *metrics.Summary
 }
 
 func (lmp *logMessageProcessor) initPeriodicFlush() {
@@ -263,9 +292,11 @@ func (lmp *logMessageProcessor) AddInsertRow(r *logstorage.InsertRow) {
 
 // flushLocked must be called under locked lmp.mu.
 func (lmp *logMessageProcessor) flushLocked() {
-	lmp.lastFlushTime = time.Now()
-	vlstorage.MustAddRows(lmp.lr)
+	start := time.Now()
+	lmp.lastFlushTime = start
+	logRowsStorage.MustAddRows(lmp.lr)
 	lmp.lr.ResetKeepSettings()
+	lmp.flushDuration.UpdateDuration(start)
 }
 
 // MustClose flushes the remaining data to the underlying storage and closes lmp.
@@ -276,6 +307,7 @@ func (lmp *logMessageProcessor) MustClose() {
 	lmp.flushLocked()
 	logstorage.PutLogRows(lmp.lr)
 	lmp.lr = nil
+	messageProcessorCount.Add(-1)
 }
 
 // NewLogMessageProcessor returns new LogMessageProcessor for the given cp.
@@ -285,12 +317,14 @@ func (cp *CommonParams) NewLogMessageProcessor(protocolName string, isStreamMode
 	lr := logstorage.GetLogRows(cp.StreamFields, cp.IgnoreFields, cp.DecolorizeFields, cp.ExtraFields, *defaultMsgValue)
 	rowsIngestedTotal := metrics.GetOrCreateCounter(fmt.Sprintf("vl_rows_ingested_total{type=%q}", protocolName))
 	bytesIngestedTotal := metrics.GetOrCreateCounter(fmt.Sprintf("vl_bytes_ingested_total{type=%q}", protocolName))
+	flushDuration := metrics.GetOrCreateSummary(fmt.Sprintf("vl_insert_flush_duration_seconds{type=%q}", protocolName))
 	lmp := &logMessageProcessor{
 		cp: cp,
 		lr: lr,
 
 		rowsIngestedTotal:  rowsIngestedTotal,
 		bytesIngestedTotal: bytesIngestedTotal,
+		flushDuration:      flushDuration,
 
 		stopCh: make(chan struct{}),
 	}
@@ -299,10 +333,13 @@ func (cp *CommonParams) NewLogMessageProcessor(protocolName string, isStreamMode
 		lmp.initPeriodicFlush()
 	}
 
+	messageProcessorCount.Add(1)
 	return lmp
 }
 
 var (
 	rowsDroppedTotalDebug         = metrics.NewCounter(`vl_rows_dropped_total{reason="debug"}`)
 	rowsDroppedTotalTooManyFields = metrics.NewCounter(`vl_rows_dropped_total{reason="too_many_fields"}`)
+	_                             = metrics.NewGauge(`vl_insert_processors_count`, func() float64 { return float64(messageProcessorCount.Load()) })
+	messageProcessorCount         atomic.Int64
 )
