@@ -1,8 +1,11 @@
 package apptest
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/url"
 	"slices"
@@ -22,6 +25,13 @@ type PrometheusQuerier interface {
 	PrometheusAPIV1QueryRange(t *testing.T, query string, opts QueryOpts) *PrometheusAPIV1QueryResponse
 	PrometheusAPIV1Series(t *testing.T, matchQuery string, opts QueryOpts) *PrometheusAPIV1SeriesResponse
 	PrometheusAPIV1ExportNative(t *testing.T, query string, opts QueryOpts) []byte
+
+	APIV1AdminTSDBDeleteSeries(t *testing.T, matchQuery string, opts QueryOpts)
+
+	// TODO(@rtm0): Prometheus does not provide this API. Either move it to a
+	// separate interface or rename this interface to allow for multiple querier
+	// types.
+	GraphiteMetricsIndex(t *testing.T, opts QueryOpts) GraphiteMetricsIndexResponse
 }
 
 // Writer contains methods for writing new data
@@ -368,6 +378,17 @@ type TSDBStatusResponse struct {
 	Data      TSDBStatusResponseData
 }
 
+// GraphiteMetricsIndexResponse is an in-memory representation of the json response
+// returned by the /graphite/metrics/index.json endpoint.
+type GraphiteMetricsIndexResponse = []string
+
+// AdminTenantsResponse is an in-memory representation of the json response
+// returned by the /api/v1/admin/tenants endpoint.
+type AdminTenantsResponse struct {
+	Status string
+	Data   []string
+}
+
 // Sort performs sorting of stats entries
 func (tsr *TSDBStatusResponse) Sort() {
 	sortTSDBStatusResponseEntries(tsr.Data.SeriesCountByLabelName)
@@ -409,4 +430,45 @@ func sortTSDBStatusResponseEntries(entries []TSDBStatusResponseEntry) {
 		}
 		return left.Count < right.Count
 	})
+}
+
+// LogsQLQueryResponse is an in-memory representation of the
+// /select/logsql/query response.
+type LogsQLQueryResponse struct {
+	LogLines []string
+}
+
+// NewLogsQLQueryResponse is a test helper function that creates a new
+// instance of LogsQLQueryResponse by unmarshalling a json string.
+func NewLogsQLQueryResponse(t *testing.T, s string) *LogsQLQueryResponse {
+	t.Helper()
+	res := &LogsQLQueryResponse{}
+	if len(s) == 0 {
+		return res
+	}
+	bs := bytes.NewBufferString(s)
+	for {
+		logLine, err := bs.ReadString('\n')
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				if len(logLine) > 0 {
+					t.Fatalf("BUG: unexpected non-empty line=%q with io.EOF", logLine)
+				}
+				break
+			}
+			t.Fatalf("BUG: cannot read logline from buffer: %s", err)
+		}
+		var lv map[string]any
+		if err := json.Unmarshal([]byte(logLine), &lv); err != nil {
+			t.Fatalf("cannot parse log line=%q: %s", logLine, err)
+		}
+		delete(lv, "_stream_id")
+		normalizedLine, err := json.Marshal(lv)
+		if err != nil {
+			t.Fatalf("cannot marshal parsed logline=%q: %s", logLine, err)
+		}
+		res.LogLines = append(res.LogLines, string(normalizedLine))
+	}
+
+	return res
 }

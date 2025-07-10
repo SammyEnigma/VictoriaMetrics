@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"hash/fnv"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -335,7 +336,9 @@ func (ar *AlertingRule) execRange(ctx context.Context, start, end time.Time) ([]
 	var result []prompbmarshal.TimeSeries
 	holdAlertState := make(map[uint64]*notifier.Alert)
 	qFn := func(_ string) ([]datasource.Metric, error) {
-		return nil, fmt.Errorf("`query` template isn't supported in replay mode")
+		logger.Warnf("`query` template isn't supported in replay mode, mocked data is used")
+		//  mock query results to allow common used template {{ query <$expr> | first | value }}
+		return []datasource.Metric{{Timestamps: []int64{0}, Values: []float64{math.NaN()}}}, nil
 	}
 	for _, s := range res.Data {
 		ls, as, err := ar.expandTemplates(s, qFn, time.Time{})
@@ -413,7 +416,7 @@ func (ar *AlertingRule) exec(ctx context.Context, ts time.Time, limit int) ([]pr
 		return nil, fmt.Errorf("failed to execute query %q: %w", ar.Expr, err)
 	}
 
-	ar.logDebugf(ts, nil, "query returned %d samples (elapsed: %s, isPartial: %t)", curState.Samples, curState.Duration, isPartialResponse(res))
+	ar.logDebugf(ts, nil, "query returned %d series (elapsed: %s, isPartial: %t)", curState.Samples, curState.Duration, isPartialResponse(res))
 	qFn := func(query string) ([]datasource.Metric, error) {
 		res, _, err := ar.q.Query(ctx, query, ts)
 		return res.Data, err
@@ -738,6 +741,13 @@ func (ar *AlertingRule) restore(ctx context.Context, q datasource.Querier, ts ti
 	}
 	var labelsFilter string
 	for k, v := range ar.Labels {
+		if strings.Contains(v, "{{") && strings.Contains(v, "}}") {
+			// do not append label to the filter when value contains template,
+			// see https://github.com/VictoriaMetrics/VictoriaMetrics/issues/9305.
+			// it's ok to do the simple check to skip some labels,
+			// since we verify the results' hash afterward to ensure the alerts match.
+			continue
+		}
 		labelsFilter += fmt.Sprintf(",%s=%q", k, v)
 	}
 	// use `default_rollup()` instead of `last_over_time()` here to accounts for possible staleness markers

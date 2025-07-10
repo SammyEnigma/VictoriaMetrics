@@ -533,6 +533,11 @@ and attaches `instance`, `job` and other target-specific labels to these metrics
   scrape_samples_post_metric_relabeling > 10000
   ```
 
+* `scrape_labels_limit` - the configured limit on the number of [labels](https://docs.victoriametrics.com/victoriametrics/keyconcepts/#labels) the given target can expose
+  per [sample](https://docs.victoriametrics.com/victoriametrics/keyconcepts/#raw-samples).
+  The limit can be set via `label_limit` option at [scrape_configs](https://docs.victoriametrics.com/victoriametrics/sd_configs/#scrape_configs).
+  This metric is exposed only if the `label_limit` is set. 
+
 * `scrape_series_added` - **an approximate** number of new [series](https://docs.victoriametrics.com/victoriametrics/keyconcepts/#time-series) the given target generates during the current scrape.
   This metric allows detecting targets (identified by `instance` label),
   which lead to [high churn rate](https://docs.victoriametrics.com/victoriametrics/faq/#what-is-high-churn-rate).
@@ -1284,6 +1289,9 @@ To switch to [the VictoriaMetrics remote write protocol](https://docs.victoriame
 simply set the `-remoteWrite.forceVMProto=true` flag. It is also possible to adjust the compression level for the VictoriaMetrics remote write protocol using the `-remoteWrite.vmProtoCompressLevel` 
 command-line flag.
 
+By default, `vmagent` uses a single producer per topic. This behaviour can be changed with setting `kafka://localhost:9092/?concurrency=<int>`, which adds additional workers. It could improve throughput in networks with high latency.
+Or if kafka brokers located at different region/availability-zone.
+
 #### Estimating message size and rate
 
 If you are migrating from remote write to Kafka, the request rate and request body size of remote write can roughly correspond to the message rate and size of Kafka.
@@ -1552,6 +1560,8 @@ See the docs at https://docs.victoriametrics.com/victoriametrics/vmagent/ .
      Incoming connections to -httpListenAddr are closed after the configured timeout. This may help evenly spreading load among a cluster of services behind TCP-level load balancer. Zero value disables closing of incoming connections (default 2m0s)
   -http.disableCORS
      Disable CORS for all origins (*)
+  -http.disableKeepAlive
+     Whether to disable HTTP keep-alive for incoming connections at -httpListenAddr
   -http.disableResponseCompression
      Disable compression of HTTP responses to save CPU resources. By default, compression is enabled to save network bandwidth
   -http.header.csp string

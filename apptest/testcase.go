@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -75,11 +76,18 @@ func (tc *TestCase) MustStartDefaultVmsingle() *Vmsingle {
 }
 
 // MustStartVmsingle is a test helper function that starts an instance of
-// vmsingle and fails the test if the app fails to start.
+// vmsingle located at ../../bin/victoria-metrics and fails the test if the app
+// fails to start.
 func (tc *TestCase) MustStartVmsingle(instance string, flags []string) *Vmsingle {
+	return tc.MustStartVmsingleAt(instance, "../../bin/victoria-metrics", flags)
+}
+
+// MustStartVmsingleAt is a test helper function that starts an instance of
+// vmsingle and fails the test if the app fails to start.
+func (tc *TestCase) MustStartVmsingleAt(instance, binary string, flags []string) *Vmsingle {
 	tc.t.Helper()
 
-	app, err := StartVmsingle(instance, flags, tc.cli)
+	app, err := StartVmsingleAt(instance, binary, flags, tc.cli)
 	if err != nil {
 		tc.t.Fatalf("Could not start %s: %v", instance, err)
 	}
@@ -189,6 +197,36 @@ func (tc *TestCase) MustStartVmauth(instance string, flags []string, configFileY
 	return app
 }
 
+// MustStartVmbackup is a test helper that starts an instance of vmbackup
+// and waits until the app exits. It fails the test if the app fails to start or
+// exits with non zero code.
+func (tc *TestCase) MustStartVmbackup(instance, storageDataPath, snapshotCreateURL, dst string) {
+	tc.t.Helper()
+
+	if err := StartVmbackup(instance, storageDataPath, snapshotCreateURL, dst); err != nil {
+		tc.t.Fatalf("vmbackup %q failed to start or exited with non-zero code: %v", instance, err)
+	}
+
+	// Do not add the process to the list of running apps using
+	// tc.addApp(instance, app), because the method blocks until the process
+	// exits.
+}
+
+// MustStartVmrestore is a test helper that starts an instance of vmrestore
+// and waits until the app exits. It fails the test if the app fails to start or
+// exits with non zero code.
+func (tc *TestCase) MustStartVmrestore(instance, src, storageDataPath string) {
+	tc.t.Helper()
+
+	if err := StartVmrestore(instance, src, storageDataPath); err != nil {
+		tc.t.Fatalf("vmrestore %q failed to start or exited with non-zero code: %v", instance, err)
+	}
+
+	// Do not add the process to the list of running apps using
+	// tc.addApp(instance, app), because the method blocks until the process
+	// exits.
+}
+
 // MustStartDefaultCluster starts a typical cluster configuration with default
 // flags.
 func (tc *TestCase) MustStartDefaultCluster() *Vmcluster {
@@ -196,9 +234,17 @@ func (tc *TestCase) MustStartDefaultCluster() *Vmcluster {
 
 	return tc.MustStartCluster(&ClusterOptions{
 		Vmstorage1Instance: "vmstorage1",
+		Vmstorage1Flags: []string{
+			"-storageDataPath=" + filepath.Join(tc.Dir(), "vmstorage1"),
+			"-retentionPeriod=100y",
+		},
 		Vmstorage2Instance: "vmstorage2",
-		VminsertInstance:   "vminsert",
-		VmselectInstance:   "vmselect",
+		Vmstorage2Flags: []string{
+			"-storageDataPath=" + filepath.Join(tc.Dir(), "vmstorage2"),
+			"-retentionPeriod=100y",
+		},
+		VminsertInstance: "vminsert",
+		VmselectInstance: "vmselect",
 	})
 }
 
@@ -228,16 +274,7 @@ type ClusterOptions struct {
 func (tc *TestCase) MustStartCluster(opts *ClusterOptions) *Vmcluster {
 	tc.t.Helper()
 
-	opts.Vmstorage1Flags = append(opts.Vmstorage1Flags, []string{
-		"-storageDataPath=" + tc.Dir() + "/" + opts.Vmstorage1Instance,
-		"-retentionPeriod=100y",
-	}...)
 	vmstorage1 := tc.MustStartVmstorage(opts.Vmstorage1Instance, opts.Vmstorage1Flags)
-
-	opts.Vmstorage2Flags = append(opts.Vmstorage2Flags, []string{
-		"-storageDataPath=" + tc.Dir() + "/" + opts.Vmstorage2Instance,
-		"-retentionPeriod=100y",
-	}...)
 	vmstorage2 := tc.MustStartVmstorage(opts.Vmstorage2Instance, opts.Vmstorage2Flags)
 
 	opts.VminsertFlags = append(opts.VminsertFlags, []string{
@@ -254,15 +291,13 @@ func (tc *TestCase) MustStartCluster(opts *ClusterOptions) *Vmcluster {
 }
 
 // MustStartVmctl is a test helper function that starts an instance of vmctl
-func (tc *TestCase) MustStartVmctl(instance string, flags []string) *Vmctl {
+func (tc *TestCase) MustStartVmctl(instance string, flags []string) {
 	tc.t.Helper()
 
-	app, err := StartVmctl(instance, flags)
+	err := StartVmctl(instance, flags)
 	if err != nil {
 		tc.t.Fatalf("Could not start %s: %v", instance, err)
 	}
-	tc.addApp(instance, app)
-	return app
 }
 
 func (tc *TestCase) addApp(instance string, app Stopper) {
